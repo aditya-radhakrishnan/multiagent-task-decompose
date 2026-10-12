@@ -1,0 +1,34 @@
+{
+  "tasks": {
+    "api_endpoint": {
+      "id": "api_endpoint",
+      "name": "API Endpoint",
+      "complexity": "simple",
+      "description": "Design and implement a new API endpoint: GET /api/user/preferences\n\nRequirements:\n- Return user preference settings (theme, language, timezone, notifications)\n- Requires authentication\n- Handle error cases appropriately\n- Provide both backend (Python/Flask) and frontend (TypeScript) implementations"
+    },
+    "auth_system": {
+      "id": "auth_system",
+      "name": "Authentication System",
+      "complexity": "medium",
+      "description": "Build a complete user authentication system with the following requirements:\n- User registration with email verification\n- Login with JWT tokens\n- Password reset functionality\n- Role-based access control (admin, user, guest)\n- Rate limiting on authentication endpoints\n- Audit logging of authentication events\n- Both backend (Python/Flask) and frontend (React/TypeScript) implementations"
+    },
+    "payment_integration": {
+      "id": "payment_integration",
+      "name": "Payment Integration",
+      "complexity": "medium",
+      "description": "Build a payment processing system:\n- Stripe payment integration for checkout\n- Subscription management (monthly/annual plans)\n- Payment history and receipts\n- Webhook handling for payment events\n- Admin dashboard for viewing transactions\n- Refund processing\n- Backend (Python/Flask) and frontend checkout flow (React/TypeScript)"
+    },
+    "ecommerce": {
+      "id": "ecommerce",
+      "name": "E-commerce Catalog",
+      "complexity": "complex",
+      "description": "Build a product catalog system with:\n- Database schema for products, categories, and inventory\n- Search functionality with filters (price range, category, rating)\n- Product recommendation engine based on viewing history\n- Admin dashboard for product management (CRUD operations)\n- Public-facing product listing and detail pages\n- Shopping cart integration\n- Image upload and storage management\n- Backend (Python/Flask), Frontend (React/TypeScript), Database (PostgreSQL)"
+    },
+    "analytics_dashboard": {
+      "id": "analytics_dashboard",
+      "name": "Analytics Dashboard",
+      "complexity": "complex",
+      "description": "Build a data analytics platform:\n- Connect to multiple data sources (CSV, databases, APIs)\n- Custom metric definitions and calculations\n- Interactive charts and visualizations\n- Dashboard builder with drag-and-drop widgets\n- Scheduled reports via email\n- Data export functionality\n- User access control and sharing\n- Backend (Python/Flask), Frontend (React/TypeScript), Database (PostgreSQL)"
+    }
+  }
+}
