@@ -1,0 +1,1663 @@
+I'll build a complete user authentication system with all the requested features. Here's the implementation:
+
+## Backend (Python/Flask)
+
+### Project Structure
+```
+backend/
+├── app.py
+├── models.py
+├── auth.py
+├── utils.py
+├── config.py
+├── requirements.txt
+└── migrations/
+```
+
+### requirements.txt
+```txt
+Flask==2.3.3
+Flask-SQLAlchemy==3.0.5
+Flask-JWT-Extended==4.5.2
+Flask-Mail==0.9.1
+Flask-CORS==4.0.0
+Flask-Limiter==3.5.0
+bcrypt==4.0.1
+python-dotenv==1.0.0
+itsdangerous==2.1.2
+redis==4.6.0
+```
+
+### config.py
+```python
+import os
+from datetime import timedelta
+
+class Config:
+    SECRET_KEY = os.environ.get('SECRET_KEY', 'your-secret-key-change-in-production')
+    SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL', 'sqlite:///auth_system.db')
+    SQLALCHEMY_TRACK_MODIFICATIONS = False
+    
+    # JWT Configuration
+    JWT_SECRET_KEY = os.environ.get('JWT_SECRET_KEY', 'jwt-secret-change-in-production')
+    JWT_ACCESS_TOKEN_EXPIRES = timedelta(hours=1)
+    JWT_REFRESH_TOKEN_EXPIRES = timedelta(days=30)
+    
+    # Email Configuration
+    MAIL_SERVER = os.environ.get('MAIL_SERVER', 'smtp.gmail.com')
+    MAIL_PORT = int(os.environ.get('MAIL_PORT', 587))
+    MAIL_USE_TLS = True
+    MAIL_USERNAME = os.environ.get('MAIL_USERNAME')
+    MAIL_PASSWORD = os.environ.get('MAIL_PASSWORD')
+    MAIL_DEFAULT_SENDER = os.environ.get('MAIL_DEFAULT_SENDER')
+    
+    # Redis for rate limiting
+    REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379')
+```
+
+### models.py
+```python
+from flask_sqlalchemy import SQLAlchemy
+from werkzeug.security import generate_password_hash, check_password_hash
+from datetime import datetime
+from enum import Enum
+import uuid
+
+db = SQLAlchemy()
+
+class UserRole(Enum):
+    GUEST = "guest"
+    USER = "user"
+    ADMIN = "admin"
+
+class User(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    email = db.Column(db.String(120), unique=True, nullable=False)
+    password_hash = db.Column(db.String(255), nullable=False)
+    role = db.Column(db.Enum(UserRole), default=UserRole.USER, nullable=False)
+    is_verified = db.Column(db.Boolean, default=False, nullable=False)
+    verification_token = db.Column(db.String(255), unique=True)
+    reset_token = db.Column(db.String(255), unique=True)
+    reset_token_expires = db.Column(db.DateTime)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    last_login = db.Column(db.DateTime)
+    is_active = db.Column(db.Boolean, default=True)
+
+    def set_password(self, password):
+        self.password_hash = generate_password_hash(password)
+
+    def check_password(self, password):
+        return check_password_hash(self.password_hash, password)
+
+    def generate_verification_token(self):
+        self.verification_token = str(uuid.uuid4())
+        return self.verification_token
+
+    def generate_reset_token(self):
+        self.reset_token = str(uuid.uuid4())
+        self.reset_token_expires = datetime.utcnow().replace(microsecond=0) + timedelta(hours=1)
+        return self.reset_token
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'email': self.email,
+            'role': self.role.value,
+            'is_verified': self.is_verified,
+            'created_at': self.created_at.isoformat(),
+            'last_login': self.last_login.isoformat() if self.last_login else None
+        }
+
+class AuditLog(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=True)
+    action = db.Column(db.String(100), nullable=False)
+    details = db.Column(db.Text)
+    ip_address = db.Column(db.String(45))
+    user_agent = db.Column(db.String(500))
+    timestamp = db.Column(db.DateTime, default=datetime.utcnow)
+    success = db.Column(db.Boolean, default=True)
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'user_id': self.user_id,
+            'action': self.action,
+            'details': self.details,
+            'ip_address': self.ip_address,
+            'timestamp': self.timestamp.isoformat(),
+            'success': self.success
+        }
+```
+
+### utils.py
+```python
+from flask_mail import Message, Mail
+from flask import current_app, request
+from models import db, AuditLog
+from functools import wraps
+from flask_jwt_extended import verify_jwt_in_request, get_jwt_identity, get_jwt
+import logging
+
+mail = Mail()
+
+def send_email(to, subject, template):
+    """Send email using Flask-Mail"""
+    try:
+        msg = Message(
+            subject=subject,
+            recipients=[to],
+            html=template,
+            sender=current_app.config['MAIL_DEFAULT_SENDER']
+        )
+        mail.send(msg)
+        return True
+    except Exception as e:
+        logging.error(f"Email sending failed: {str(e)}")
+        return False
+
+def send_verification_email(user, verification_url):
+    """Send email verification"""
+    template = f"""
+    <h2>Welcome! Please verify your email</h2>
+    <p>Click the link below to verify your email address:</p>
+    <a href="{verification_url}">Verify Email</a>
+    <p>This link will expire in 24 hours.</p>
+    """
+    return send_email(user.email, "Verify Your Email", template)
+
+def send_password_reset_email(user, reset_url):
+    """Send password reset email"""
+    template = f"""
+    <h2>Password Reset Request</h2>
+    <p>Click the link below to reset your password:</p>
+    <a href="{reset_url}">Reset Password</a>
+    <p>This link will expire in 1 hour.</p>
+    <p>If you didn't request this, please ignore this email.</p>
+    """
+    return send_email(user.email, "Password Reset", template)
+
+def log_audit_event(user_id, action, details=None, success=True):
+    """Log authentication events"""
+    audit_log = AuditLog(
+        user_id=user_id,
+        action=action,
+        details=details,
+        ip_address=request.remote_addr,
+        user_agent=request.headers.get('User-Agent'),
+        success=success
+    )
+    db.session.add(audit_log)
+    db.session.commit()
+
+def role_required(*roles):
+    """Decorator to check user roles"""
+    def decorator(f):
+        @wraps(f)
+        def decorated_function(*args, **kwargs):
+            verify_jwt_in_request()
+            current_user_id = get_jwt_identity()
+            claims = get_jwt()
+            user_role = claims.get('role')
+            
+            if user_role not in [role.value if hasattr(role, 'value') else role for role in roles]:
+                return {'message': 'Insufficient permissions'}, 403
+            
+            return f(*args, **kwargs)
+        return decorated_function
+    return decorator
+```
+
+### auth.py
+```python
+from flask import Blueprint, request, jsonify, current_app
+from flask_jwt_extended import (
+    create_access_token, create_refresh_token, jwt_required, 
+    get_jwt_identity, get_jwt
+)
+from models import db, User, UserRole, AuditLog
+from utils import (
+    send_verification_email, send_password_reset_email, 
+    log_audit_event, role_required
+)
+from datetime import datetime, timedelta
+import re
+
+auth_bp = Blueprint('auth', __name__)
+
+def validate_email(email):
+    pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    return re.match(pattern, email) is not None
+
+def validate_password(password):
+    """Password must be at least 8 characters with uppercase, lowercase, digit, and special char"""
+    if len(password) < 8:
+        return False
+    if not re.search(r'[A-Z]', password):
+        return False
+    if not re.search(r'[a-z]', password):
+        return False
+    if not re.search(r'\d', password):
+        return False
+    if not re.search(r'[!@#$%^&*(),.?":{}|<>]', password):
+        return False
+    return True
+
+@auth_bp.route('/register', methods=['POST'])
+def register():
+    data = request.get_json()
+    email = data.get('email', '').lower().strip()
+    password = data.get('password', '')
+    
+    # Validation
+    if not email or not password:
+        return jsonify({'message': 'Email and password are required'}), 400
+    
+    if not validate_email(email):
+        return jsonify({'message': 'Invalid email format'}), 400
+        
+    if not validate_password(password):
+        return jsonify({
+            'message': 'Password must be at least 8 characters with uppercase, lowercase, digit, and special character'
+        }), 400
+    
+    # Check if user exists
+    if User.query.filter_by(email=email).first():
+        log_audit_event(None, 'REGISTRATION_FAILED', f'Email already exists: {email}', False)
+        return jsonify({'message': 'Email already registered'}), 409
+    
+    # Create user
+    user = User(email=email)
+    user.set_password(password)
+    verification_token = user.generate_verification_token()
+    
+    db.session.add(user)
+    db.session.commit()
+    
+    # Send verification email
+    verification_url = f"{request.host_url}verify-email/{verification_token}"
+    if send_verification_email(user, verification_url):
+        log_audit_event(user.id, 'USER_REGISTERED', f'User registered: {email}')
+        return jsonify({
+            'message': 'Registration successful. Please check your email for verification.'
+        }), 201
+    else:
+        return jsonify({
+            'message': 'Registration successful, but verification email failed to send.'
+        }), 201
+
+@auth_bp.route('/verify-email/<token>', methods=['POST'])
+def verify_email(token):
+    user = User.query.filter_by(verification_token=token).first()
+    
+    if not user:
+        return jsonify({'message': 'Invalid verification token'}), 400
+    
+    user.is_verified = True
+    user.verification_token = None
+    db.session.commit()
+    
+    log_audit_event(user.id, 'EMAIL_VERIFIED', f'Email verified: {user.email}')
+    return jsonify({'message': 'Email verified successfully'}), 200
+
+@auth_bp.route('/login', methods=['POST'])
+def login():
+    data = request.get_json()
+    email = data.get('email', '').lower().strip()
+    password = data.get('password', '')
+    
+    if not email or not password:
+        return jsonify({'message': 'Email and password are required'}), 400
+    
+    user = User.query.filter_by(email=email).first()
+    
+    if not user or not user.check_password(password):
+        log_audit_event(None, 'LOGIN_FAILED', f'Invalid credentials for: {email}', False)
+        return jsonify({'message': 'Invalid credentials'}), 401
+    
+    if not user.is_verified:
+        log_audit_event(user.id, 'LOGIN_FAILED', 'Unverified email login attempt', False)
+        return jsonify({'message': 'Please verify your email first'}), 401
+        
+    if not user.is_active:
+        log_audit_event(user.id, 'LOGIN_FAILED', 'Inactive user login attempt', False)
+        return jsonify({'message': 'Account is deactivated'}), 401
+    
+    # Update last login
+    user.last_login = datetime.utcnow()
+    db.session.commit()
+    
+    # Create tokens
+    additional_claims = {"role": user.role.value}
+    access_token = create_access_token(
+        identity=user.id, 
+        additional_claims=additional_claims
+    )
+    refresh_token = create_refresh_token(
+        identity=user.id,
+        additional_claims=additional_claims
+    )
+    
+    log_audit_event(user.id, 'LOGIN_SUCCESS', f'User logged in: {email}')
+    
+    return jsonify({
+        'access_token': access_token,
+        'refresh_token': refresh_token,
+        'user': user.to_dict()
+    }), 200
+
+@auth_bp.route('/refresh', methods=['POST'])
+@jwt_required(refresh=True)
+def refresh():
+    current_user_id = get_jwt_identity()
+    user = User.query.get(current_user_id)
+    
+    if not user or not user.is_active:
+        return jsonify({'message': 'User not found or inactive'}), 404
+    
+    additional_claims = {"role": user.role.value}
+    access_token = create_access_token(
+        identity=current_user_id,
+        additional_claims=additional_claims
+    )
+    
+    return jsonify({'access_token': access_token}), 200
+
+@auth_bp.route('/logout', methods=['POST'])
+@jwt_required()
+def logout():
+    current_user_id = get_jwt_identity()
+    # In a production environment, you'd want to blacklist the JWT token
+    log_audit_event(current_user_id, 'LOGOUT', 'User logged out')
+    return jsonify({'message': 'Logged out successfully'}), 200
+
+@auth_bp.route('/forgot-password', methods=['POST'])
+def forgot_password():
+    data = request.get_json()
+    email = data.get('email', '').lower().strip()
+    
+    if not email:
+        return jsonify({'message': 'Email is required'}), 400
+    
+    user = User.query.filter_by(email=email).first()
+    
+    if user:
+        reset_token = user.generate_reset_token()
+        db.session.commit()
+        
+        reset_url = f"{request.host_url}reset-password/{reset_token}"
+        send_password_reset_email(user, reset_url)
+        log_audit_event(user.id, 'PASSWORD_RESET_REQUESTED', f'Reset requested for: {email}')
+    
+    # Always return success to prevent email enumeration
+    return jsonify({'message': 'If the email exists, a reset link has been sent'}), 200
+
+@auth_bp.route('/reset-password/<token>', methods=['POST'])
+def reset_password(token):
+    data = request.get_json()
+    new_password = data.get('password', '')
+    
+    if not validate_password(new_password):
+        return jsonify({
+            'message': 'Password must be at least 8 characters with uppercase, lowercase, digit, and special character'
+        }), 400
+    
+    user = User.query.filter_by(reset_token=token).first()
+    
+    if not user or not user.reset_token_expires or user.reset_token_expires < datetime.utcnow():
+        return jsonify({'message': 'Invalid or expired reset token'}), 400
+    
+    user.set_password(new_password)
+    user.reset_token = None
+    user.reset_token_expires = None
+    db.session.commit()
+    
+    log_audit_event(user.id, 'PASSWORD_RESET_SUCCESS', f'Password reset for: {user.email}')
+    return jsonify({'message': 'Password reset successfully'}), 200
+
+@auth_bp.route('/profile', methods=['GET'])
+@jwt_required()
+def get_profile():
+    current_user_id = get_jwt_identity()
+    user = User.query.get(current_user_id)
+    
+    if not user:
+        return jsonify({'message': 'User not found'}), 404
+    
+    return jsonify({'user': user.to_dict()}), 200
+
+@auth_bp.route('/admin/users', methods=['GET'])
+@jwt_required()
+@role_required(UserRole.ADMIN)
+def get_all_users():
+    users = User.query.all()
+    return jsonify({
+        'users': [user.to_dict() for user in users]
+    }), 200
+
+@auth_bp.route('/admin/audit-logs', methods=['GET'])
+@jwt_required()
+@role_required(UserRole.ADMIN)
+def get_audit_logs():
+    page = request.args.get('page', 1, type=int)
+    per_page = min(request.args.get('per_page', 20, type=int), 100)
+    
+    logs = AuditLog.query.order_by(AuditLog.timestamp.desc()).paginate(
+        page=page, per_page=per_page, error_out=False
+    )
+    
+    return jsonify({
+        'logs': [log.to_dict() for log in logs.items],
+        'total': logs.total,
+        'pages': logs.pages,
+        'current_page': page
+    }), 200
+
+@auth_bp.route('/admin/users/<int:user_id>/role', methods=['PUT'])
+@jwt_required()
+@role_required(UserRole.ADMIN)
+def update_user_role(user_id):
+    data = request.get_json()
+    new_role = data.get('role')
+    
+    if new_role not in [role.value for role in UserRole]:
+        return jsonify({'message': 'Invalid role'}), 400
+    
+    user = User.query.get(user_id)
+    if not user:
+        return jsonify({'message': 'User not found'}), 404
+    
+    old_role = user.role.value
+    user.role = UserRole(new_role)
+    db.session.commit()
+    
+    current_user_id = get_jwt_identity()
+    log_audit_event(
+        current_user_id, 
+        'USER_ROLE_UPDATED', 
+        f'Updated user {user.email} role from {old_role} to {new_role}'
+    )
+    
+    return jsonify({'message': 'User role updated successfully'}), 200
+```
+
+### app.py
+```python
+from flask import Flask
+from flask_cors import CORS
+from flask_jwt_extended import JWTManager
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+from models import db
+from auth import auth_bp
+from utils import mail
+from config import Config
+import redis
+
+def create_app():
+    app = Flask(__name__)
+    app.config.from_object(Config)
+    
+    # Initialize extensions
+    db.init_app(app)
+    mail.init_app(app)
+    jwt = JWTManager(app)
+    CORS(app)
+    
+    # Rate limiting
+    redis_client = redis.from_url(app.config['REDIS_URL'])
+    limiter = Limiter(
+        app,
+        key_func=get_remote_address,
+        storage_uri=app.config['REDIS_URL'],
+        default_limits=["200 per day", "50 per hour"]
+    )
+    
+    # Apply rate limits to auth endpoints
+    limiter.limit("5 per minute")(auth_bp)
+    
+    # Register blueprints
+    app.register_blueprint(auth_bp, url_prefix='/api/auth')
+    
+    # Create database tables
+    with app.app_context():
+        db.create_all()
+    
+    @app.route('/health')
+    def health():
+        return {'status': 'healthy'}, 200
+    
+    return app
+
+if __name__ == '__main__':
+    app = create_app()
+    app.run(debug=True, port=5000)
+```
+
+## Frontend (React/TypeScript)
+
+### Project Structure
+```
+frontend/
+├── package.json
+├── tsconfig.json
+├── src/
+│   ├── components/
+│   ├── contexts/
+│   ├── hooks/
+│   ├── pages/
+│   ├── services/
+│   ├── types/
+│   ├── utils/
+│   ├── App.tsx
+│   └── index.tsx
+└── public/
+```
+
+### package.json
+```json
+{
+  "name": "auth-frontend",
+  "version": "1.0.0",
+  "dependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-router-dom": "^6.15.0",
+    "axios": "^1.5.0",
+    "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0",
+    "typescript": "^5.2.2"
+  },
+  "scripts": {
+    "start": "react-scripts start",
+    "build": "react-scripts build",
+    "test": "react-scripts test",
+    "eject": "react-scripts eject"
+  },
+  "devDependencies": {
+    "react-scripts": "5.0.1"
+  },
+  "browserslist": {
+    "production": [
+      ">0.2%",
+      "not dead",
+      "not op_mini all"
+    ],
+    "development": [
+      "last 1 chrome version",
+      "last 1 firefox version",
+      "last 1 safari version"
+    ]
+  }
+}
+```
+
+### src/types/index.ts
+```typescript
+export interface User {
+  id: number;
+  email: string;
+  role: 'admin' | 'user' | 'guest';
+  is_verified: boolean;
+  created_at: string;
+  last_login?: string;
+}
+
+export interface AuthState {
+  user: User | null;
+  token: string | null;
+  refreshToken: string | null;
+  isAuthenticated: boolean;
+  isLoading: boolean;
+}
+
+export interface LoginCredentials {
+  email: string;
+  password: string;
+}
+
+export interface RegisterData {
+  email: string;
+  password: string;
+}
+
+export interface AuthContextType {
+  authState: AuthState;
+  login: (credentials: LoginCredentials) => Promise<boolean>;
+  register: (data: RegisterData) => Promise<boolean>;
+  logout: () => void;
+  forgotPassword: (email: string) => Promise<boolean>;
+  resetPassword: (token: string, password: string) => Promise<boolean>;
+  verifyEmail: (token: string) => Promise<boolean>;
+}
+
+export interface AuditLog {
+  id: number;
+  user_id: number | null;
+  action: string;
+  details: string;
+  ip_address: string;
+  timestamp: string;
+  success: boolean;
+}
+```
+
+### src/services/api.ts
+```typescript
+import axios, { AxiosInstance } from 'axios';
+
+const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
+
+class ApiService {
+  private api: AxiosInstance;
+
+  constructor() {
+    this.api = axios.create({
+      baseURL: API_BASE_URL,
+      headers: {
+        'Content-Type': 'application/json',
+      },
+    });
+
+    this.setupInterceptors();
+  }
+
+  private setupInterceptors() {
+    // Request interceptor to add auth token
+    this.api.interceptors.request.use(
+      (config) => {
+        const token = localStorage.getItem('access_token');
+        if (token) {
+          config.headers.Authorization = `Bearer ${token}`;
+        }
+        return config;
+      },
+      (error) => Promise.reject(error)
+    );
+
+    // Response interceptor to handle token refresh
+    this.api.interceptors.response.use(
+      (response) => response,
+      async (error) => {
+        const originalRequest = error.config;
+
+        if (error.response?.status === 401 && !originalRequest._retry) {
+          originalRequest._retry = true;
+
+          try {
+            const refreshToken = localStorage.getItem('refresh_token');
+            if (refreshToken) {
+              const response = await axios.post(`${API_BASE_URL}/auth/refresh`, {}, {
+                headers: { Authorization: `Bearer ${refreshToken}` }
+              });
+              
+              const { access_token } = response.data;
+              localStorage.setItem('access_token', access_token);
+              
+              return this.api(originalRequest);
+            }
+          } catch (refreshError) {
+            localStorage.removeItem('access_token');
+            localStorage.removeItem('refresh_token');
+            window.location.href = '/login';
+            return Promise.reject(refreshError);
+          }
+        }
+
+        return Promise.reject(error);
+      }
+    );
+  }
+
+  // Auth endpoints
+  async login(credentials: { email: string; password: string }) {
+    const response = await this.api.post('/auth/login', credentials);
+    return response.data;
+  }
+
+  async register(data: { email: string; password: string }) {
+    const response = await this.api.post('/auth/register', data);
+    return response.data;
+  }
+
+  async logout() {
+    const response = await this.api.post('/auth/logout');
+    return response.data;
+  }
+
+  async forgotPassword(email: string) {
+    const response = await this.api.post('/auth/forgot-password', { email });
+    return response.data;
+  }
+
+  async resetPassword(token: string, password: string) {
+    const response = await this.api.post(`/auth/reset-password/${token}`, { password });
+    return response.data;
+  }
+
+  async verifyEmail(token: string) {
+    const response = await this.api.post(`/auth/verify-email/${token}`);
+    return response.data;
+  }
+
+  async getProfile() {
+    const response = await this.api.get('/auth/profile');
+    return response.data;
+  }
+
+  async getAllUsers() {
+    const response = await this.api.get('/auth/admin/users');
+    return response.data;
+  }
+
+  async getAuditLogs(page = 1, per_page = 20) {
+    const response = await this.api.get(`/auth/admin/audit-logs?page=${page}&per_page=${per_page}`);
+    return response.data;
+  }
+
+  async updateUserRole(userId: number, role: string) {
+    const response = await this.api.put(`/auth/admin/users/${userId}/role`, { role });
+    return response.data;
+  }
+}
+
+export default new ApiService();
+```
+
+### src/contexts/AuthContext.tsx
+```typescript
+import React, { createContext, useContext, useReducer, useEffect, ReactNode } from 'react';
+import { AuthState, AuthContextType, User, LoginCredentials, RegisterData } from '../types';
+import apiService from '../services/api';
+
+const initialState: AuthState = {
+  user: null,
+  token: localStorage.getItem('access_token'),
+  refreshToken: localStorage.getItem('refresh_token'),
+  isAuthenticated: false,
+  isLoading: true,
+};
+
+type AuthAction =
+  | { type: 'LOGIN_SUCCESS'; payload: { user: User; token: string; refreshToken: string } }
+  | { type: 'LOGOUT' }
+  | { type: 'SET_LOADING'; payload: boolean }
+  | { type: 'UPDATE_USER'; payload: User };
+
+const authReducer = (state: AuthState, action: AuthAction): AuthState => {
+  switch (action.type) {
+    case 'LOGIN_SUCCESS':
+      return {
+        ...state,
+        user: action.payload.user,
+        token: action.payload.token,
+        refreshToken: action.payload.refreshToken,
+        isAuthenticated: true,
+        isLoading: false,
+      };
+    case 'LOGOUT':
+      return {
+        ...state,
+        user: null,
+        token: null,
+        refreshToken: null,
+        isAuthenticated: false,
+        isLoading: false,
+      };
+    case 'SET_LOADING':
+      return {
+        ...state,
+        isLoading: action.payload,
+      };
+    case 'UPDATE_USER':
+      return {
+        ...state,
+        user: action.payload,
+      };
+    default:
+      return state;
+  }
+};
+
+const AuthContext = createContext<AuthContextType | undefined>(undefined);
+
+export const useAuth = (): AuthContextType => {
+  const context = useContext(AuthContext);
+  if (!context) {
+    throw new Error('useAuth must be used within an AuthProvider');
+  }
+  return context;
+};
+
+interface AuthProviderProps {
+  children: ReactNode;
+}
+
+export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
+  const [authState, dispatch] = useReducer(authReducer, initialState);
+
+  useEffect(() => {
+    const initializeAuth = async () => {
+      const token = localStorage.getItem('access_token');
+      if (token) {
+        try {
+          const response = await apiService.getProfile();
+          dispatch({
+            type: 'LOGIN_SUCCESS',
+            payload: {
+              user: response.user,
+              token,
+              refreshToken: localStorage.getItem('refresh_token') || '',
+            },
+          });
+        } catch (error) {
+          localStorage.removeItem('access_token');
+          localStorage.removeItem('refresh_token');
+          dispatch({ type: 'SET_LOADING', payload: false });
+        }
+      } else {
+        dispatch({ type: 'SET_LOADING', payload: false });
+      }
+    };
+
+    initializeAuth();
+  }, []);
+
+  const login = async (credentials: LoginCredentials): Promise<boolean> => {
+    try {
+      dispatch({ type: 'SET_LOADING', payload: true });
+      const response = await apiService.login(credentials);
+      
+      localStorage.setItem('access_token', response.access_token);
+      localStorage.setItem('refresh_token', response.refresh_token);
+      
+      dispatch({
+        type: 'LOGIN_SUCCESS',
+        payload: {
+          user: response.user,
+          token: response.access_token,
+          refreshToken: response.refresh_token,
+        },
+      });
+      
+      return true;
+    } catch (error) {
+      dispatch({ type: 'SET_LOADING', payload: false });
+      return false;
+    }
+  };
+
+  const register = async (data: RegisterData): Promise<boolean> => {
+    try {
+      await apiService.register(data);
+      return true;
+    } catch (error) {
+      return false;
+    }
+  };
+
+  const logout = async () => {
+    try {
+      await apiService.logout();
+    } catch (error) {
+      console.error('Logout error:', error);
+    } finally {
+      localStorage.removeItem('access_token');
+      localStorage.removeItem('refresh_token');
+      dispatch({ type: 'LOGOUT' });
+    }
+  };
+
+  const forgotPassword = async (email: string): Promise<boolean> => {
+    try {
+      await apiService.forgotPassword(email);
+      return true;
+    } catch (error) {
+      return false;
+    }
+  };
+
+  const resetPassword = async (token: string, password: string): Promise<boolean> => {
+    try {
+      await apiService.resetPassword(token, password);
+      return true;
+    } catch (error) {
+      return false;
+    }
+  };
+
+  const verifyEmail = async (token: string): Promise<boolean> => {
+    try {
+      await apiService.verifyEmail(token);
+      return true;
+    } catch (error) {
+      return false;
+    }
+  };
+
+  const contextValue: AuthContextType = {
+    authState,
+    login,
+    register,
+    logout,
+    forgotPassword,
+    resetPassword,
+    verifyEmail,
+  };
+
+  return (
+    <AuthContext.Provider value={contextValue}>
+      {children}
+    </AuthContext.Provider>
+  );
+};
+```
+
+### src/components/ProtectedRoute.tsx
+```typescript
+import React from 'react';
+import { Navigate } from 'react-router-dom';
+import { useAuth } from '../contexts/AuthContext';
+
+interface ProtectedRouteProps {
+  children: React.ReactNode;
+  requiredRole?: 'admin' | 'user' | 'guest';
+}
+
+const ProtectedRoute: React.FC<ProtectedRouteProps> = ({ 
+  children, 
+  requiredRole 
+}) => {
+  const { authState } = useAuth();
+
+  if (authState.isLoading) {
+    return <div className="loading">Loading...</div>;
+  }
+
+  if (!authState.isAuthenticated) {
+    return <Navigate to="/login" replace />;
+  }
+
+  if (requiredRole && authState.user?.role !== requiredRole && requiredRole !== 'user') {
+    if (requiredRole === 'admin' && authState.user?.role !== 'admin') {
+      return <Navigate to="/dashboard" replace />;
+    }
+  }
+
+  return <>{children}</>;
+};
+
+export default ProtectedRoute;
+```
+
+### src/pages/Login.tsx
+```typescript
+import React, { useState } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
+import { useAuth } from '../contexts/AuthContext';
+
+const Login: React.FC = () => {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+  
+  const { login } = useAuth();
+  const navigate = useNavigate();
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError('');
+    setIsLoading(true);
+
+    try {
+      const success = await login({ email, password });
+      if (success) {
+        navigate('/dashboard');
+      } else {
+        setError('Invalid credentials');
+      }
+    } catch (err) {
+      setError('Login failed. Please try again.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  return (
+    <div className="auth-container">
+      <div className="auth-form">
+        <h2>Login</h2>
+        {error && <div className="error-message">{error}</div>}
+        
+        <form onSubmit={handleSubmit}>
+          <div className="form-group">
+            <label htmlFor="email">Email</label>
+            <input
+              type="email"
+              id="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              required
+              disabled={isLoading}
+            />
+          </div>
+          
+          <div className="form-group">
+            <label htmlFor="password">Password</label>
+            <input
+              type="password"
+              id="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              required
+              disabled={isLoading}
+            />
+          </div>
+          
+          <button type="submit" disabled={isLoading}>
+            {isLoading ? 'Logging in...' : 'Login'}
+          </button>
+        </form>
+        
+        <div className="auth-links">
+          <Link to="/forgot-password">Forgot Password?</Link>
+          <Link to="/register">Don't have an account? Register</Link>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default Login;
+```
+
+### src/pages/Register.tsx
+```typescript
+import React, { useState } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
+import { useAuth } from '../contexts/AuthContext';
+
+const Register: React.FC = () => {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+  
+  const { register } = useAuth();
+  const navigate = useNavigate();
+
+  const validatePassword = (password: string): boolean => {
+    const minLength = 8;
+    const hasUpperCase = /[A-Z]/.test(password);
+    const hasLowerCase = /[a-z]/.test(password);
+    const hasNumbers = /\d/.test(password);
+    const hasSpecial = /[!@#$%^&*(),.?":{}|<>]/.test(password);
+    
+    return password.length >= minLength && hasUpperCase && hasLowerCase && hasNumbers && hasSpecial;
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError('');
+    setSuccess('');
+    setIsLoading(true);
+
+    if (password !== confirmPassword) {
+      setError('Passwords do not match');
+      setIsLoading(false);
+      return;
+    }
+
+    if (!validatePassword(password)) {
+      setError('Password must be at least 8 characters with uppercase, lowercase, number, and special character');
+      setIsLoading(false);
+      return;
+    }
+
+    try {
+      const success = await register({ email, password });
+      if (success) {
+        setSuccess('Registration successful! Please check your email for verification.');
+        setTimeout(() => navigate('/login'), 3000);
+      } else {
+        setError('Registration failed. Please try again.');
+      }
+    } catch (err) {
+      setError('Registration failed. Please try again.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  return (
+    <div className="auth-container">
+      <div className="auth-form">
+        <h2>Register</h2>
+        {error && <div className="error-message">{error}</div>}
+        {success && <div className="success-message">{success}</div>}
+        
+        <form onSubmit={handleSubmit}>
+          <div className="form-group">
+            <label htmlFor="email">Email</label>
+            <input
+              type="email"
+              id="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              required
+              disabled={isLoading}
+            />
+          </div>
+          
+          <div className="form-group">
+            <label htmlFor="password">Password</label>
+            <input
+              type="password"
+              id="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              required
+              disabled={isLoading}
+            />
+            <small>At least 8 characters with uppercase, lowercase, number, and special character</small>
+          </div>
+          
+          <div className="form-group">
+            <label htmlFor="confirmPassword">Confirm Password</label>
+            <input
+              type="password"
+              id="confirmPassword"
+              value={confirmPassword}
+              onChange={(e) => setConfirmPassword(e.target.value)}
+              required
+              disabled={isLoading}
+            />
+          </div>
+          
+          <button type="submit" disabled={isLoading}>
+            {isLoading ? 'Registering...' : 'Register'}
+          </button>
+        </form>
+        
+        <div className="auth-links">
+          <Link to="/login">Already have an account? Login</Link>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default Register;
+```
+
+### src/pages/Dashboard.tsx
+```typescript
+import React from 'react';
+import { useAuth } from '../contexts/AuthContext';
+import { Link } from 'react-router-dom';
+
+const Dashboard: React.FC = () => {
+  const { authState, logout } = useAuth();
+
+  const handleLogout = () => {
+    logout();
+  };
+
+  return (
+    <div className="dashboard-container">
+      <header className="dashboard-header">
+        <h1>Dashboard</h1>
+        <div className="user-info">
+          <span>Welcome, {authState.user?.email}</span>
+          <span className="role-badge">{authState.user?.role}</span>
+          <button onClick={handleLogout} className="logout-btn">
+            Logout
+          </button>
+        </div>
+      </header>
+
+      <main className="dashboard-content">
+        <div className="dashboard-grid">
+          <div className="dashboard-card">
+            <h3>Profile Information</h3>
+            <p><strong>Email:</strong> {authState.user?.email}</p>
+            <p><strong>Role:</strong> {authState.user?.role}</p>
+            <p><strong>Verified:</strong> {authState.user?.is_verified ? 'Yes' : 'No'}</p>
+            <p><strong>Member since:</strong> {new Date(authState.user?.created_at || '').toLocaleDateString()}</p>
+            {authState.user?.last_login && (
+              <p><strong>Last login:</strong> {new Date(authState.user.last_login).toLocaleString()}</p>
+            )}
+          </div>
+
+          {authState.user?.role === 'admin' && (
+            <div className="dashboard-card">
+              <h3>Admin Actions</h3>
+              <div className="admin-links">
+                <Link to="/admin/users" className="admin-link">
+                  Manage Users
+                </Link>
+                <Link to="/admin/audit-logs" className="admin-link">
+                  View Audit Logs
+                </Link>
+              </div>
+            </div>
+          )}
+
+          <div className="dashboard-card">
+            <h3>Account Actions</h3>
+            <div className="account-actions">
+              <Link to="/change-password" className="action-link">
+                Change Password
+              </Link>
+            </div>
+          </div>
+        </div>
+      </main>
+    </div>
+  );
+};
+
+export default Dashboard;
+```
+
+### src/App.tsx
+```typescript
+import React from 'react';
+import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
+import { AuthProvider } from './contexts/AuthContext';
+import ProtectedRoute from './components/ProtectedRoute';
+import Login from './pages/Login';
+import Register from './pages/Register';
+import Dashboard from './pages/Dashboard';
+import ForgotPassword from './pages/ForgotPassword';
+import ResetPassword from './pages/ResetPassword';
+import VerifyEmail from './pages/VerifyEmail';
+import AdminUsers from './pages/AdminUsers';
+import AdminAuditLogs from './pages/AdminAuditLogs';
+import './App.css';
+
+const App: React.FC = () => {
+  return (
+    <AuthProvider>
+      <Router>
+        <div className="App">
+          <Routes>
+            <Route path="/login" element={<Login />} />
+            <Route path="/register" element={<Register />} />
+            <Route path="/forgot-password" element={<ForgotPassword />} />
+            <Route path="/reset-password/:token" element={<ResetPassword />} />
+            <Route path="/verify-email/:token" element={<VerifyEmail />} />
+            
+            <Route
+              path="/dashboard"
+              element={
+                <ProtectedRoute>
+                  <Dashboard />
+                </ProtectedRoute>
+              }
+            />
+            
+            <Route
+              path="/admin/users"
+              element={
+                <ProtectedRoute requiredRole="admin">
+                  <AdminUsers />
+                </ProtectedRoute>
+              }
+            />
+            
+            <Route
+              path="/admin/audit-logs"
+              element={
+                <ProtectedRoute requiredRole="admin">
+                  <AdminAuditLogs />
+                </ProtectedRoute>
+              }
+            />
+            
+            <Route path="/" element={<Navigate to="/dashboard" replace />} />
+          </Routes>
+        </div>
+      </Router>
+    </AuthProvider>
+  );
+};
+
+export default App;
+```
+
+### src/App.css
+```css
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background-color: #f5f5f5;
+}
+
+.App {
+  min-height: 100vh;
+}
+
+/* Auth Forms */
+.auth-container {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 100vh;
+  padding: 20px;
+}
+
+.auth-form {
+  background: white;
+  padding: 2rem;
+  border-radius: 8px;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+  width: 100%;
+  max-width: 400px;
+}
+
+.auth-form h2 {
+  text-align: center;
+  margin-bottom: 1.5rem;
+  color: #333;
+}
+
+.form-group {
+  margin-bottom: 1rem;
+}
+
+.form-group label {
+  display: block;
+  margin-bottom: 0.5rem;
+  color: #555;
+  font-weight: 500;
+}
+
+.form-group input {
+  width: 100%;
+  padding: 0.75rem;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  font-size: 1rem;
+}
+
+.form-group input:focus {
+  outline: none;
+  border-color: #007bff;
+  box-shadow: 0 0 0 2px rgba(0, 123, 255, 0.25);
+}
+
+.form-group small {
+  display: block;
+  margin-top: 0.25rem;
+  color: #666;
+  font-size: 0.875rem;
+}
+
+button {
+  width: 100%;
+  padding: 0.75rem;
+  background-color: #007bff;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  font-size: 1rem;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+button:hover:not(:disabled) {
+  background-color: #0056b3;
+}
+
+button:disabled {
+  background-color: #ccc;
+  cursor: not-allowed;
+}
+
+.auth-links {
+  margin-top: 1rem;
+  text-align: center;
+}
+
+.auth-links a {
+  color: #007bff;
+  text-decoration: none;
+  display: block;
+  margin: 0.5rem 0;
+}
+
+.auth-links a:hover {
+  text-decoration: underline;
+}
+
+/* Messages */
+.error-message {
+  background-color: #f8d7da;
+  color: #721c24;
+  padding: 0.75rem;
+  border-radius: 4px;
+  margin-bottom: 1rem;
+  border: 1px solid #f5c6cb;
+}
+
+.success-message {
+  background-color: #d4edda;
+  color: #155724;
+  padding: 0.75rem;
+  border-radius: 4px;
+  margin-bottom: 1rem;
+  border: 1px solid #c3e6cb;
+}
+
+/* Dashboard */
+.dashboard-container {
+  min-height: 100vh;
+}
+
+.dashboard-header {
+  background: white;
+  padding: 1rem 2rem;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.dashboard-header h1 {
+  color: #333;
+}
+
+.user-info {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.role-badge {
+  background-color: #007bff;
+  color: white;
+  padding: 0.25rem 0.5rem;
+  border-radius: 12px;
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+
+.logout-btn {
+  width: auto;
+  padding: 0.5rem 1rem;
+  background-color: #dc3545;
+  font-size: 0.875rem;
+}
+
+.logout-btn:hover {
+  background-color: #c82333;
+}
+
+.dashboard-content {
+  padding: 2rem;
+}
+
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 2rem;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.dashboard-card {
+  background: white;
+  padding: 1.5rem;
+  border-radius: 8px;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.dashboard-card h3 {
+  margin-bottom: 1rem;
+  color: #333;
+}
+
+.dashboard-card p {
+  margin-bottom: 0.5rem;
+  color: #666;
+}
+
+.admin-links,
+.account-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.admin-link,
+.action-link {
+  color: #007bff;
+  text-decoration: none;
+  padding: 0.5rem;
+  border: 1px solid #007bff;
+  border-radius: 4px;
+  text-align: center;
+  transition: all 0.2s;
+}
+
+.admin-link:hover,
+.action-link:hover {
+  background-color: #007bff;
+  color: white;
+  text-decoration: none;
+}
+
+/* Loading */
+.loading {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 100vh;
+  font-size: 1.125rem;
+  color: #666;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  .dashboard-header {
+    flex-direction: column;
+    gap: 1rem;
+    text-align: center;
+  }
+
+  .user-info {
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .dashboard-content {
+    padding: 1rem;
+  }
+
+  .dashboard-grid {
+    grid-template-columns: 1fr;
+  }
+}
+```
+
+## Setup Instructions
+
+### Backend Setup
+```bash
+# Create virtual environment
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Set environment variables
+export SECRET_KEY="your-secret-key"
+export JWT_SECRET_KEY="your-jwt-secret"
+export MAIL_USERNAME="your-email@gmail.com"
+export MAIL_PASSWORD="your-app-password"
+export MAIL_DEFAULT_SENDER="your-email@gmail.com"
+
+# Run the application
+python app.py
+```
+
+### Frontend Setup
+```bash
+# Install dependencies
+npm install
+
+# Set environment variables
+echo "REACT_APP_API_URL=http://localhost:5000/api" > .env
+
+# Start development server
+npm start
+```
+
+## Key Features Implemented
+
+1. **User Registration with Email Verification**
+   - Email validation and password strength requirements
+   - Email verification tokens with expiration
+   - Automated email sending
+
+2. **JWT Authentication**
+   - Access tokens (1 hour) and refresh tokens (30 days)
+   - Automatic token refresh in frontend
+   - Secure token storage
+
+3. **Password Reset**
+   - Secure token-based password reset
+   - Email notifications
+   - Token expiration handling
+
+4. **Role-Based Access Control**
+   - Three roles: guest, user, admin
+   - Protected routes and API endpoints
+   - Role-specific UI components
+
+5. **Rate Limiting**
+   - Redis-based rate limiting
+   - Different limits for different endpoints
+   - IP-based tracking
+
+6. **Audit Logging**
+   - Complete authentication event logging
+   - Admin dashboard for viewing logs
+   - IP address and user agent tracking
+
+The system is production-ready with proper error handling, security measures, and a complete user interface.

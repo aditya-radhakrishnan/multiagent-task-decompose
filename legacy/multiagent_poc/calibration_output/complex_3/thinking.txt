@@ -1,0 +1,40 @@
+This is a substantial software engineering task that requires building a complete data analytics platform. Let me break this down into the main components:
+
+1. Backend (Python/Flask):
+   - API endpoints for data sources, metrics, dashboards, reports
+   - Database models and migrations
+   - Authentication and authorization
+   - Background job processing for scheduled reports
+   - Data processing and calculations
+
+2. Frontend (React/TypeScript):
+   - Dashboard builder with drag-and-drop
+   - Chart/visualization components
+   - User management interface
+   - Data source configuration
+   - Report scheduling interface
+
+3. Database (PostgreSQL):
+   - User management
+   - Data source configurations
+   - Dashboard definitions
+   - Metrics and calculations
+   - Reports and schedules
+
+4. Key Features:
+   - Multiple data source connectors (CSV, DB, API)
+   - Custom metric definitions
+   - Interactive charts
+   - Drag-and-drop dashboard builder
+   - Scheduled email reports
+   - Data export
+   - User access control
+
+I'll structure this as a complete implementation with:
+- Backend Flask application with proper structure
+- React TypeScript frontend
+- PostgreSQL schema
+- Docker setup for development
+- Core functionality implementation
+
+Let me start with the backend structure, then frontend, and include the database schema.

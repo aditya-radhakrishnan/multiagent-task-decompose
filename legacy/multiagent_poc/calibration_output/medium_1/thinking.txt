@@ -1,0 +1,38 @@
+This is a comprehensive authentication system request. I need to build:
+
+1. Backend (Python/Flask):
+   - User registration with email verification
+   - JWT token authentication
+   - Password reset functionality
+   - Role-based access control
+   - Rate limiting
+   - Audit logging
+
+2. Frontend (React/TypeScript):
+   - Registration form
+   - Login form
+   - Password reset form
+   - Protected routes based on roles
+   - JWT token management
+
+Let me structure this properly:
+
+Backend components:
+- Flask app with SQLAlchemy
+- User model with roles
+- JWT token management
+- Email verification system
+- Password reset system
+- Rate limiting middleware
+- Audit logging
+- API endpoints
+
+Frontend components:
+- React app with TypeScript
+- Authentication context
+- Forms for registration, login, password reset
+- Protected routes
+- Token management
+- Role-based component rendering
+
+I'll create a complete, working system with all the requested features.

@@ -1,0 +1,17 @@
+{
+  "task_id": "medium_1",
+  "task_name": "Authentication System",
+  "ground_truth": "SINGLE_AGENT",
+  "actual_input_tokens": 147,
+  "actual_output_tokens": 13926,
+  "truncated": false,
+  "stop_reason": "end_turn",
+  "execution_time_seconds": 131.78,
+  "response_length_chars": 44362,
+  "thinking_length_chars": 946,
+  "cost_usd": 0.209331,
+  "success": true,
+  "model": "claude-sonnet-4-20250514",
+  "extended_thinking_enabled": true,
+  "ground_truth_validation": "CONFIRMED - SINGLE_AGENT worked as expected"
+}

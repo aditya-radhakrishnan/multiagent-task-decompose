@@ -1,0 +1,45 @@
+This is a comprehensive task requiring a full-stack product catalog system. I'll build:
+
+1. Backend (Python/Flask):
+   - Database models for products, categories, inventory, users, cart, viewing history
+   - RESTful API endpoints
+   - Authentication/authorization
+   - Search and filtering
+   - Recommendation engine
+   - Image upload handling
+
+2. Frontend (React/TypeScript):
+   - Admin dashboard
+   - Public product listing
+   - Product detail pages
+   - Shopping cart
+   - Search and filters
+
+3. Database (PostgreSQL):
+   - Schema design with proper relationships
+
+Let me create a complete, working implementation:
+
+Structure:
+```
+product-catalog/
+├── backend/
+│   ├── app.py
+│   ├── models.py
+│   ├── routes/
+│   ├── config.py
+│   ├── requirements.txt
+│   └── utils/
+├── frontend/
+│   ├── src/
+│   │   ├── components/
+│   │   ├── pages/
+│   │   ├── services/
+│   │   ├── types/
+│   │   └── App.tsx
+│   ├── package.json
+│   └── tsconfig.json
+└── README.md
+```
+
+I'll provide complete, functional code for all components.

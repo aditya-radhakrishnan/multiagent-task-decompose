@@ -1,0 +1,1636 @@
+I'll build a complete payment processing system with Stripe integration. Here's the implementation:
+
+## Backend (Python/Flask)
+
+### Requirements
+
+```txt
+Flask==2.3.3
+Flask-SQLAlchemy==3.0.5
+Flask-CORS==4.0.0
+Flask-JWT-Extended==4.5.3
+stripe==6.7.0
+python-dotenv==1.0.0
+requests==2.31.0
+```
+
+### Environment Configuration
+
+```python
+# config.py
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+class Config:
+    SECRET_KEY = os.environ.get('SECRET_KEY') or 'dev-secret-key'
+    SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL') or 'sqlite:///payments.db'
+    SQLALCHEMY_TRACK_MODIFICATIONS = False
+    STRIPE_SECRET_KEY = os.environ.get('STRIPE_SECRET_KEY')
+    STRIPE_PUBLISHABLE_KEY = os.environ.get('STRIPE_PUBLISHABLE_KEY')
+    STRIPE_WEBHOOK_SECRET = os.environ.get('STRIPE_WEBHOOK_SECRET')
+    JWT_SECRET_KEY = os.environ.get('JWT_SECRET_KEY') or 'jwt-secret-key'
+```
+
+### Database Models
+
+```python
+# models.py
+from flask_sqlalchemy import SQLAlchemy
+from datetime import datetime
+from enum import Enum
+
+db = SQLAlchemy()
+
+class PaymentStatus(Enum):
+    PENDING = "pending"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    REFUNDED = "refunded"
+
+class SubscriptionStatus(Enum):
+    ACTIVE = "active"
+    CANCELED = "canceled"
+    PAST_DUE = "past_due"
+    INCOMPLETE = "incomplete"
+
+class User(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    email = db.Column(db.String(120), unique=True, nullable=False)
+    stripe_customer_id = db.Column(db.String(100), unique=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    
+    payments = db.relationship('Payment', backref='user', lazy=True)
+    subscriptions = db.relationship('Subscription', backref='user', lazy=True)
+
+class Payment(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    stripe_payment_intent_id = db.Column(db.String(100), unique=True, nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    amount = db.Column(db.Integer, nullable=False)  # Amount in cents
+    currency = db.Column(db.String(3), default='usd')
+    status = db.Column(db.Enum(PaymentStatus), default=PaymentStatus.PENDING)
+    description = db.Column(db.String(255))
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    completed_at = db.Column(db.DateTime)
+
+class Subscription(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    stripe_subscription_id = db.Column(db.String(100), unique=True, nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    plan_name = db.Column(db.String(50), nullable=False)  # monthly/annual
+    amount = db.Column(db.Integer, nullable=False)
+    status = db.Column(db.Enum(SubscriptionStatus), default=SubscriptionStatus.INCOMPLETE)
+    current_period_start = db.Column(db.DateTime)
+    current_period_end = db.Column(db.DateTime)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    canceled_at = db.Column(db.DateTime)
+
+class Refund(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    stripe_refund_id = db.Column(db.String(100), unique=True, nullable=False)
+    payment_id = db.Column(db.Integer, db.ForeignKey('payment.id'), nullable=False)
+    amount = db.Column(db.Integer, nullable=False)
+    reason = db.Column(db.String(255))
+    status = db.Column(db.String(20), default='pending')
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    
+    payment = db.relationship('Payment', backref='refunds')
+```
+
+### Stripe Service
+
+```python
+# stripe_service.py
+import stripe
+from flask import current_app
+from models import db, User, Payment, Subscription, Refund, PaymentStatus, SubscriptionStatus
+from datetime import datetime
+
+stripe.api_key = current_app.config['STRIPE_SECRET_KEY'] if current_app else None
+
+class StripeService:
+    @staticmethod
+    def create_customer(email):
+        """Create a Stripe customer"""
+        try:
+            customer = stripe.Customer.create(email=email)
+            return customer
+        except stripe.error.StripeError as e:
+            raise Exception(f"Failed to create customer: {str(e)}")
+
+    @staticmethod
+    def create_payment_intent(amount, currency='usd', customer_id=None, description=None):
+        """Create a payment intent"""
+        try:
+            payment_intent = stripe.PaymentIntent.create(
+                amount=amount,
+                currency=currency,
+                customer=customer_id,
+                description=description,
+                automatic_payment_methods={'enabled': True}
+            )
+            return payment_intent
+        except stripe.error.StripeError as e:
+            raise Exception(f"Failed to create payment intent: {str(e)}")
+
+    @staticmethod
+    def create_subscription(customer_id, price_id):
+        """Create a subscription"""
+        try:
+            subscription = stripe.Subscription.create(
+                customer=customer_id,
+                items=[{'price': price_id}],
+                payment_behavior='default_incomplete',
+                payment_settings={'save_default_payment_method': 'on_subscription'},
+                expand=['latest_invoice.payment_intent']
+            )
+            return subscription
+        except stripe.error.StripeError as e:
+            raise Exception(f"Failed to create subscription: {str(e)}")
+
+    @staticmethod
+    def cancel_subscription(subscription_id):
+        """Cancel a subscription"""
+        try:
+            subscription = stripe.Subscription.delete(subscription_id)
+            return subscription
+        except stripe.error.StripeError as e:
+            raise Exception(f"Failed to cancel subscription: {str(e)}")
+
+    @staticmethod
+    def create_refund(payment_intent_id, amount=None, reason=None):
+        """Create a refund"""
+        try:
+            refund_data = {'payment_intent': payment_intent_id}
+            if amount:
+                refund_data['amount'] = amount
+            if reason:
+                refund_data['reason'] = reason
+                
+            refund = stripe.Refund.create(**refund_data)
+            return refund
+        except stripe.error.StripeError as e:
+            raise Exception(f"Failed to create refund: {str(e)}")
+
+    @staticmethod
+    def retrieve_payment_intent(payment_intent_id):
+        """Retrieve payment intent"""
+        try:
+            return stripe.PaymentIntent.retrieve(payment_intent_id)
+        except stripe.error.StripeError as e:
+            raise Exception(f"Failed to retrieve payment intent: {str(e)}")
+```
+
+### Main Application
+
+```python
+# app.py
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity
+import stripe
+from config import Config
+from models import db, User, Payment, Subscription, Refund, PaymentStatus, SubscriptionStatus
+from stripe_service import StripeService
+import json
+from datetime import datetime
+
+app = Flask(__name__)
+app.config.from_object(Config)
+
+db.init_app(app)
+CORS(app)
+jwt = JWTManager(app)
+stripe.api_key = app.config['STRIPE_SECRET_KEY']
+
+# Subscription plans
+PLANS = {
+    'monthly': {'price_id': 'price_monthly_plan_id', 'amount': 999},  # $9.99
+    'annual': {'price_id': 'price_annual_plan_id', 'amount': 9999}   # $99.99
+}
+
+@app.before_first_request
+def create_tables():
+    db.create_all()
+
+# Auth Routes
+@app.route('/api/register', methods=['POST'])
+def register():
+    data = request.json
+    email = data.get('email')
+    
+    if not email:
+        return jsonify({'error': 'Email is required'}), 400
+    
+    existing_user = User.query.filter_by(email=email).first()
+    if existing_user:
+        return jsonify({'error': 'User already exists'}), 400
+    
+    try:
+        # Create Stripe customer
+        stripe_customer = StripeService.create_customer(email)
+        
+        # Create user
+        user = User(email=email, stripe_customer_id=stripe_customer.id)
+        db.session.add(user)
+        db.session.commit()
+        
+        access_token = create_access_token(identity=user.id)
+        return jsonify({
+            'access_token': access_token,
+            'user': {'id': user.id, 'email': user.email}
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/login', methods=['POST'])
+def login():
+    data = request.json
+    email = data.get('email')
+    
+    user = User.query.filter_by(email=email).first()
+    if not user:
+        return jsonify({'error': 'User not found'}), 404
+    
+    access_token = create_access_token(identity=user.id)
+    return jsonify({
+        'access_token': access_token,
+        'user': {'id': user.id, 'email': user.email}
+    })
+
+# Payment Routes
+@app.route('/api/create-payment-intent', methods=['POST'])
+@jwt_required()
+def create_payment_intent():
+    user_id = get_jwt_identity()
+    user = User.query.get(user_id)
+    
+    data = request.json
+    amount = data.get('amount')  # Amount in cents
+    description = data.get('description', '')
+    
+    if not amount:
+        return jsonify({'error': 'Amount is required'}), 400
+    
+    try:
+        payment_intent = StripeService.create_payment_intent(
+            amount=amount,
+            customer_id=user.stripe_customer_id,
+            description=description
+        )
+        
+        # Save payment record
+        payment = Payment(
+            stripe_payment_intent_id=payment_intent.id,
+            user_id=user_id,
+            amount=amount,
+            description=description
+        )
+        db.session.add(payment)
+        db.session.commit()
+        
+        return jsonify({
+            'client_secret': payment_intent.client_secret,
+            'payment_id': payment.id
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/create-subscription', methods=['POST'])
+@jwt_required()
+def create_subscription():
+    user_id = get_jwt_identity()
+    user = User.query.get(user_id)
+    
+    data = request.json
+    plan = data.get('plan')  # 'monthly' or 'annual'
+    
+    if plan not in PLANS:
+        return jsonify({'error': 'Invalid plan'}), 400
+    
+    try:
+        subscription = StripeService.create_subscription(
+            customer_id=user.stripe_customer_id,
+            price_id=PLANS[plan]['price_id']
+        )
+        
+        # Save subscription record
+        sub = Subscription(
+            stripe_subscription_id=subscription.id,
+            user_id=user_id,
+            plan_name=plan,
+            amount=PLANS[plan]['amount']
+        )
+        db.session.add(sub)
+        db.session.commit()
+        
+        return jsonify({
+            'subscription_id': subscription.id,
+            'client_secret': subscription.latest_invoice.payment_intent.client_secret,
+            'status': subscription.status
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/cancel-subscription/<int:subscription_id>', methods=['DELETE'])
+@jwt_required()
+def cancel_subscription(subscription_id):
+    user_id = get_jwt_identity()
+    
+    subscription = Subscription.query.filter_by(
+        id=subscription_id, 
+        user_id=user_id
+    ).first()
+    
+    if not subscription:
+        return jsonify({'error': 'Subscription not found'}), 404
+    
+    try:
+        StripeService.cancel_subscription(subscription.stripe_subscription_id)
+        
+        subscription.status = SubscriptionStatus.CANCELED
+        subscription.canceled_at = datetime.utcnow()
+        db.session.commit()
+        
+        return jsonify({'message': 'Subscription canceled successfully'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# Payment History
+@app.route('/api/payments', methods=['GET'])
+@jwt_required()
+def get_payments():
+    user_id = get_jwt_identity()
+    payments = Payment.query.filter_by(user_id=user_id).order_by(Payment.created_at.desc()).all()
+    
+    return jsonify([{
+        'id': p.id,
+        'amount': p.amount,
+        'currency': p.currency,
+        'status': p.status.value,
+        'description': p.description,
+        'created_at': p.created_at.isoformat(),
+        'completed_at': p.completed_at.isoformat() if p.completed_at else None
+    } for p in payments])
+
+@app.route('/api/subscriptions', methods=['GET'])
+@jwt_required()
+def get_subscriptions():
+    user_id = get_jwt_identity()
+    subscriptions = Subscription.query.filter_by(user_id=user_id).order_by(Subscription.created_at.desc()).all()
+    
+    return jsonify([{
+        'id': s.id,
+        'plan_name': s.plan_name,
+        'amount': s.amount,
+        'status': s.status.value,
+        'current_period_start': s.current_period_start.isoformat() if s.current_period_start else None,
+        'current_period_end': s.current_period_end.isoformat() if s.current_period_end else None,
+        'created_at': s.created_at.isoformat(),
+        'canceled_at': s.canceled_at.isoformat() if s.canceled_at else None
+    } for s in subscriptions])
+
+# Admin Routes
+@app.route('/api/admin/transactions', methods=['GET'])
+@jwt_required()
+def get_all_transactions():
+    # In a real app, you'd check for admin permissions
+    payments = Payment.query.order_by(Payment.created_at.desc()).all()
+    
+    return jsonify([{
+        'id': p.id,
+        'user_email': p.user.email,
+        'amount': p.amount,
+        'currency': p.currency,
+        'status': p.status.value,
+        'description': p.description,
+        'created_at': p.created_at.isoformat(),
+        'completed_at': p.completed_at.isoformat() if p.completed_at else None
+    } for p in payments])
+
+@app.route('/api/admin/refund', methods=['POST'])
+@jwt_required()
+def create_refund():
+    data = request.json
+    payment_id = data.get('payment_id')
+    amount = data.get('amount')  # Optional partial refund
+    reason = data.get('reason', 'requested_by_customer')
+    
+    payment = Payment.query.get(payment_id)
+    if not payment:
+        return jsonify({'error': 'Payment not found'}), 404
+    
+    try:
+        stripe_refund = StripeService.create_refund(
+            payment_intent_id=payment.stripe_payment_intent_id,
+            amount=amount,
+            reason=reason
+        )
+        
+        # Save refund record
+        refund = Refund(
+            stripe_refund_id=stripe_refund.id,
+            payment_id=payment_id,
+            amount=stripe_refund.amount,
+            reason=reason,
+            status=stripe_refund.status
+        )
+        db.session.add(refund)
+        
+        # Update payment status if fully refunded
+        if not amount or amount == payment.amount:
+            payment.status = PaymentStatus.REFUNDED
+        
+        db.session.commit()
+        
+        return jsonify({
+            'refund_id': refund.id,
+            'amount': refund.amount,
+            'status': refund.status
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# Webhook handler
+@app.route('/webhook', methods=['POST'])
+def stripe_webhook():
+    payload = request.get_data()
+    sig_header = request.headers.get('Stripe-Signature')
+    
+    try:
+        event = stripe.Webhook.construct_event(
+            payload, sig_header, app.config['STRIPE_WEBHOOK_SECRET']
+        )
+    except ValueError:
+        return 'Invalid payload', 400
+    except stripe.error.SignatureVerificationError:
+        return 'Invalid signature', 400
+    
+    # Handle the event
+    if event['type'] == 'payment_intent.succeeded':
+        payment_intent = event['data']['object']
+        payment = Payment.query.filter_by(
+            stripe_payment_intent_id=payment_intent['id']
+        ).first()
+        if payment:
+            payment.status = PaymentStatus.COMPLETED
+            payment.completed_at = datetime.utcnow()
+            db.session.commit()
+    
+    elif event['type'] == 'invoice.payment_succeeded':
+        invoice = event['data']['object']
+        subscription_id = invoice['subscription']
+        subscription = Subscription.query.filter_by(
+            stripe_subscription_id=subscription_id
+        ).first()
+        if subscription:
+            subscription.status = SubscriptionStatus.ACTIVE
+            subscription.current_period_start = datetime.fromtimestamp(
+                invoice['period_start']
+            )
+            subscription.current_period_end = datetime.fromtimestamp(
+                invoice['period_end']
+            )
+            db.session.commit()
+    
+    elif event['type'] == 'customer.subscription.deleted':
+        subscription_obj = event['data']['object']
+        subscription = Subscription.query.filter_by(
+            stripe_subscription_id=subscription_obj['id']
+        ).first()
+        if subscription:
+            subscription.status = SubscriptionStatus.CANCELED
+            subscription.canceled_at = datetime.utcnow()
+            db.session.commit()
+    
+    return jsonify({'status': 'success'})
+
+if __name__ == '__main__':
+    app.run(debug=True)
+```
+
+## Frontend (React/TypeScript)
+
+### Package.json
+
+```json
+{
+  "name": "payment-frontend",
+  "version": "0.1.0",
+  "dependencies": {
+    "@stripe/stripe-js": "^2.1.0",
+    "@stripe/react-stripe-js": "^2.1.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-router-dom": "^6.15.0",
+    "axios": "^1.5.0",
+    "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0",
+    "typescript": "^5.0.0"
+  },
+  "scripts": {
+    "start": "react-scripts start",
+    "build": "react-scripts build",
+    "test": "react-scripts test",
+    "eject": "react-scripts eject"
+  },
+  "browserslist": {
+    "production": [">0.2%", "not dead", "not op_mini all"],
+    "development": ["last 1 chrome version", "last 1 firefox version", "last 1 safari version"]
+  },
+  "devDependencies": {
+    "react-scripts": "5.0.1"
+  }
+}
+```
+
+### Types
+
+```typescript
+// types/index.ts
+export interface User {
+  id: number;
+  email: string;
+}
+
+export interface Payment {
+  id: number;
+  amount: number;
+  currency: string;
+  status: 'pending' | 'completed' | 'failed' | 'refunded';
+  description: string;
+  created_at: string;
+  completed_at?: string;
+}
+
+export interface Subscription {
+  id: number;
+  plan_name: 'monthly' | 'annual';
+  amount: number;
+  status: 'active' | 'canceled' | 'past_due' | 'incomplete';
+  current_period_start?: string;
+  current_period_end?: string;
+  created_at: string;
+  canceled_at?: string;
+}
+
+export interface Transaction {
+  id: number;
+  user_email: string;
+  amount: number;
+  currency: string;
+  status: string;
+  description: string;
+  created_at: string;
+  completed_at?: string;
+}
+```
+
+### API Service
+
+```typescript
+// services/api.ts
+import axios from 'axios';
+import { User, Payment, Subscription, Transaction } from '../types';
+
+const API_BASE_URL = 'http://localhost:5000/api';
+
+const api = axios.create({
+  baseURL: API_BASE_URL,
+});
+
+// Add auth token to requests
+api.interceptors.request.use((config) => {
+  const token = localStorage.getItem('access_token');
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`;
+  }
+  return config;
+});
+
+export const authAPI = {
+  register: async (email: string): Promise<{ access_token: string; user: User }> => {
+    const response = await api.post('/register', { email });
+    return response.data;
+  },
+  
+  login: async (email: string): Promise<{ access_token: string; user: User }> => {
+    const response = await api.post('/login', { email });
+    return response.data;
+  },
+};
+
+export const paymentAPI = {
+  createPaymentIntent: async (amount: number, description: string) => {
+    const response = await api.post('/create-payment-intent', { amount, description });
+    return response.data;
+  },
+  
+  createSubscription: async (plan: 'monthly' | 'annual') => {
+    const response = await api.post('/create-subscription', { plan });
+    return response.data;
+  },
+  
+  cancelSubscription: async (subscriptionId: number) => {
+    const response = await api.delete(`/cancel-subscription/${subscriptionId}`);
+    return response.data;
+  },
+  
+  getPayments: async (): Promise<Payment[]> => {
+    const response = await api.get('/payments');
+    return response.data;
+  },
+  
+  getSubscriptions: async (): Promise<Subscription[]> => {
+    const response = await api.get('/subscriptions');
+    return response.data;
+  },
+};
+
+export const adminAPI = {
+  getTransactions: async (): Promise<Transaction[]> => {
+    const response = await api.get('/admin/transactions');
+    return response.data;
+  },
+  
+  createRefund: async (paymentId: number, amount?: number, reason?: string) => {
+    const response = await api.post('/admin/refund', { payment_id: paymentId, amount, reason });
+    return response.data;
+  },
+};
+```
+
+### Auth Context
+
+```typescript
+// contexts/AuthContext.tsx
+import React, { createContext, useContext, useState, useEffect } from 'react';
+import { User } from '../types';
+import { authAPI } from '../services/api';
+
+interface AuthContextType {
+  user: User | null;
+  login: (email: string) => Promise<void>;
+  register: (email: string) => Promise<void>;
+  logout: () => void;
+  isLoading: boolean;
+}
+
+const AuthContext = createContext<AuthContextType | undefined>(undefined);
+
+export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const [user, setUser] = useState<User | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+
+  useEffect(() => {
+    const token = localStorage.getItem('access_token');
+    const userData = localStorage.getItem('user');
+    
+    if (token && userData) {
+      setUser(JSON.parse(userData));
+    }
+    setIsLoading(false);
+  }, []);
+
+  const login = async (email: string) => {
+    try {
+      const response = await authAPI.login(email);
+      localStorage.setItem('access_token', response.access_token);
+      localStorage.setItem('user', JSON.stringify(response.user));
+      setUser(response.user);
+    } catch (error) {
+      throw error;
+    }
+  };
+
+  const register = async (email: string) => {
+    try {
+      const response = await authAPI.register(email);
+      localStorage.setItem('access_token', response.access_token);
+      localStorage.setItem('user', JSON.stringify(response.user));
+      setUser(response.user);
+    } catch (error) {
+      throw error;
+    }
+  };
+
+  const logout = () => {
+    localStorage.removeItem('access_token');
+    localStorage.removeItem('user');
+    setUser(null);
+  };
+
+  return (
+    <AuthContext.Provider value={{ user, login, register, logout, isLoading }}>
+      {children}
+    </AuthContext.Provider>
+  );
+};
+
+export const useAuth = () => {
+  const context = useContext(AuthContext);
+  if (context === undefined) {
+    throw new Error('useAuth must be used within an AuthProvider');
+  }
+  return context;
+};
+```
+
+### Checkout Component
+
+```typescript
+// components/Checkout.tsx
+import React, { useState } from 'react';
+import { loadStripe } from '@stripe/stripe-js';
+import { Elements, CardElement, useStripe, useElements } from '@stripe/react-stripe-js';
+import { paymentAPI } from '../services/api';
+
+const stripePromise = loadStripe('your_stripe_publishable_key');
+
+interface CheckoutFormProps {
+  amount: number;
+  description: string;
+  onSuccess: () => void;
+}
+
+const CheckoutForm: React.FC<CheckoutFormProps> = ({ amount, description, onSuccess }) => {
+  const stripe = useStripe();
+  const elements = useElements();
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleSubmit = async (event: React.FormEvent) => {
+    event.preventDefault();
+
+    if (!stripe || !elements) {
+      return;
+    }
+
+    setIsProcessing(true);
+    setError(null);
+
+    try {
+      const { client_secret } = await paymentAPI.createPaymentIntent(amount, description);
+      
+      const card = elements.getElement(CardElement);
+      if (!card) {
+        throw new Error('Card element not found');
+      }
+
+      const result = await stripe.confirmCardPayment(client_secret, {
+        payment_method: {
+          card: card,
+        }
+      });
+
+      if (result.error) {
+        setError(result.error.message || 'Payment failed');
+      } else {
+        onSuccess();
+      }
+    } catch (err: any) {
+      setError(err.message || 'Payment failed');
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  return (
+    <form onSubmit={handleSubmit} className="checkout-form">
+      <div className="form-group">
+        <label>Card Details</label>
+        <CardElement
+          options={{
+            style: {
+              base: {
+                fontSize: '16px',
+                color: '#424770',
+                '::placeholder': {
+                  color: '#aab7c4',
+                },
+              },
+            },
+          }}
+        />
+      </div>
+      
+      {error && <div className="error-message">{error}</div>}
+      
+      <button 
+        type="submit" 
+        disabled={!stripe || isProcessing}
+        className="pay-button"
+      >
+        {isProcessing ? 'Processing...' : `Pay $${(amount / 100).toFixed(2)}`}
+      </button>
+    </form>
+  );
+};
+
+interface CheckoutProps {
+  amount: number;
+  description: string;
+  onSuccess: () => void;
+}
+
+const Checkout: React.FC<CheckoutProps> = ({ amount, description, onSuccess }) => {
+  return (
+    <Elements stripe={stripePromise}>
+      <CheckoutForm amount={amount} description={description} onSuccess={onSuccess} />
+    </Elements>
+  );
+};
+
+export default Checkout;
+```
+
+### Subscription Management
+
+```typescript
+// components/SubscriptionManager.tsx
+import React, { useState, useEffect } from 'react';
+import { loadStripe } from '@stripe/stripe-js';
+import { Elements, CardElement, useStripe, useElements } from '@stripe/react-stripe-js';
+import { paymentAPI } from '../services/api';
+import { Subscription } from '../types';
+
+const stripePromise = loadStripe('your_stripe_publishable_key');
+
+const plans = {
+  monthly: { name: 'Monthly Plan', amount: 999, description: '$9.99/month' },
+  annual: { name: 'Annual Plan', amount: 9999, description: '$99.99/year' },
+};
+
+interface SubscriptionFormProps {
+  plan: 'monthly' | 'annual';
+  onSuccess: () => void;
+}
+
+const SubscriptionForm: React.FC<SubscriptionFormProps> = ({ plan, onSuccess }) => {
+  const stripe = useStripe();
+  const elements = useElements();
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleSubmit = async (event: React.FormEvent) => {
+    event.preventDefault();
+
+    if (!stripe || !elements) {
+      return;
+    }
+
+    setIsProcessing(true);
+    setError(null);
+
+    try {
+      const { client_secret } = await paymentAPI.createSubscription(plan);
+      
+      const card = elements.getElement(CardElement);
+      if (!card) {
+        throw new Error('Card element not found');
+      }
+
+      const result = await stripe.confirmCardPayment(client_secret, {
+        payment_method: {
+          card: card,
+        }
+      });
+
+      if (result.error) {
+        setError(result.error.message || 'Subscription failed');
+      } else {
+        onSuccess();
+      }
+    } catch (err: any) {
+      setError(err.message || 'Subscription failed');
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  return (
+    <div className="subscription-form">
+      <h3>{plans[plan].name}</h3>
+      <p>{plans[plan].description}</p>
+      
+      <form onSubmit={handleSubmit}>
+        <div className="form-group">
+          <label>Card Details</label>
+          <CardElement />
+        </div>
+        
+        {error && <div className="error-message">{error}</div>}
+        
+        <button 
+          type="submit" 
+          disabled={!stripe || isProcessing}
+          className="subscribe-button"
+        >
+          {isProcessing ? 'Processing...' : 'Subscribe'}
+        </button>
+      </form>
+    </div>
+  );
+};
+
+const SubscriptionManager: React.FC = () => {
+  const [subscriptions, setSubscriptions] = useState<Subscription[]>([]);
+  const [selectedPlan, setSelectedPlan] = useState<'monthly' | 'annual' | null>(null);
+
+  useEffect(() => {
+    loadSubscriptions();
+  }, []);
+
+  const loadSubscriptions = async () => {
+    try {
+      const subs = await paymentAPI.getSubscriptions();
+      setSubscriptions(subs);
+    } catch (error) {
+      console.error('Failed to load subscriptions:', error);
+    }
+  };
+
+  const handleCancel = async (subscriptionId: number) => {
+    try {
+      await paymentAPI.cancelSubscription(subscriptionId);
+      await loadSubscriptions();
+    } catch (error) {
+      console.error('Failed to cancel subscription:', error);
+    }
+  };
+
+  const handleSubscriptionSuccess = () => {
+    setSelectedPlan(null);
+    loadSubscriptions();
+  };
+
+  return (
+    <div className="subscription-manager">
+      <h2>Subscription Management</h2>
+      
+      {/* Current Subscriptions */}
+      <div className="current-subscriptions">
+        <h3>Current Subscriptions</h3>
+        {subscriptions.length === 0 ? (
+          <p>No active subscriptions</p>
+        ) : (
+          subscriptions.map(sub => (
+            <div key={sub.id} className="subscription-item">
+              <div>
+                <strong>{sub.plan_name.charAt(0).toUpperCase() + sub.plan_name.slice(1)} Plan</strong>
+                <p>Status: {sub.status}</p>
+                <p>Amount: ${(sub.amount / 100).toFixed(2)}</p>
+                {sub.current_period_end && (
+                  <p>Next billing: {new Date(sub.current_period_end).toLocaleDateString()}</p>
+                )}
+              </div>
+              {sub.status === 'active' && (
+                <button 
+                  onClick={() => handleCancel(sub.id)}
+                  className="cancel-button"
+                >
+                  Cancel
+                </button>
+              )}
+            </div>
+          ))
+        )}
+      </div>
+
+      {/* Plan Selection */}
+      <div className="plan-selection">
+        <h3>Subscribe to a Plan</h3>
+        <div className="plans">
+          {Object.entries(plans).map(([key, plan]) => (
+            <div key={key} className="plan-card">
+              <h4>{plan.name}</h4>
+              <p>{plan.description}</p>
+              <button 
+                onClick={() => setSelectedPlan(key as 'monthly' | 'annual')}
+                className="select-plan-button"
+              >
+                Select Plan
+              </button>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Subscription Form */}
+      {selectedPlan && (
+        <div className="subscription-form-container">
+          <Elements stripe={stripePromise}>
+            <SubscriptionForm 
+              plan={selectedPlan} 
+              onSuccess={handleSubscriptionSuccess}
+            />
+          </Elements>
+          <button 
+            onClick={() => setSelectedPlan(null)}
+            className="cancel-form-button"
+          >
+            Cancel
+          </button>
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default SubscriptionManager;
+```
+
+### Payment History
+
+```typescript
+// components/PaymentHistory.tsx
+import React, { useState, useEffect } from 'react';
+import { paymentAPI } from '../services/api';
+import { Payment } from '../types';
+
+const PaymentHistory: React.FC = () => {
+  const [payments, setPayments] = useState<Payment[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    loadPayments();
+  }, []);
+
+  const loadPayments = async () => {
+    try {
+      const paymentData = await paymentAPI.getPayments();
+      setPayments(paymentData);
+    } catch (error) {
+      console.error('Failed to load payments:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const getStatusColor = (status: string) => {
+    switch (status) {
+      case 'completed': return 'green';
+      case 'failed': return 'red';
+      case 'refunded': return 'orange';
+      default: return 'gray';
+    }
+  };
+
+  if (loading) {
+    return <div>Loading payment history...</div>;
+  }
+
+  return (
+    <div className="payment-history">
+      <h2>Payment History</h2>
+      
+      {payments.length === 0 ? (
+        <p>No payments found</p>
+      ) : (
+        <div className="payments-table">
+          <table>
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Description</th>
+                <th>Amount</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {payments.map(payment => (
+                <tr key={payment.id}>
+                  <td>{new Date(payment.created_at).toLocaleDateString()}</td>
+                  <td>{payment.description || 'Payment'}</td>
+                  <td>${(payment.amount / 100).toFixed(2)}</td>
+                  <td>
+                    <span 
+                      className="status-badge"
+                      style={{ color: getStatusColor(payment.status) }}
+                    >
+                      {payment.status.charAt(0).toUpperCase() + payment.status.slice(1)}
+                    </span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default PaymentHistory;
+```
+
+### Admin Dashboard
+
+```typescript
+// components/AdminDashboard.tsx
+import React, { useState, useEffect } from 'react';
+import { adminAPI } from '../services/api';
+import { Transaction } from '../types';
+
+const AdminDashboard: React.FC = () => {
+  const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [refundForm, setRefundForm] = useState<{
+    paymentId: number | null;
+    amount: string;
+    reason: string;
+  }>({
+    paymentId: null,
+    amount: '',
+    reason: 'requested_by_customer'
+  });
+
+  useEffect(() => {
+    loadTransactions();
+  }, []);
+
+  const loadTransactions = async () => {
+    try {
+      const transactionData = await adminAPI.getTransactions();
+      setTransactions(transactionData);
+    } catch (error) {
+      console.error('Failed to load transactions:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleRefund = async () => {
+    if (!refundForm.paymentId) return;
+
+    try {
+      const amount = refundForm.amount ? parseInt(refundForm.amount) * 100 : undefined;
+      await adminAPI.createRefund(refundForm.paymentId, amount, refundForm.reason);
+      
+      setRefundForm({ paymentId: null, amount: '', reason: 'requested_by_customer' });
+      await loadTransactions();
+      alert('Refund processed successfully');
+    } catch (error) {
+      console.error('Failed to process refund:', error);
+      alert('Failed to process refund');
+    }
+  };
+
+  const openRefundForm = (paymentId: number, maxAmount: number) => {
+    setRefundForm({
+      paymentId,
+      amount: (maxAmount / 100).toString(),
+      reason: 'requested_by_customer'
+    });
+  };
+
+  if (loading) {
+    return <div>Loading transactions...</div>;
+  }
+
+  return (
+    <div className="admin-dashboard">
+      <h2>Admin Dashboard</h2>
+      
+      <div className="transactions-table">
+        <table>
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>User</th>
+              <th>Description</th>
+              <th>Amount</th>
+              <th>Status</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {transactions.map(transaction => (
+              <tr key={transaction.id}>
+                <td>{new Date(transaction.created_at).toLocaleDateString()}</td>
+                <td>{transaction.user_email}</td>
+                <td>{transaction.description || 'Payment'}</td>
+                <td>${(transaction.amount / 100).toFixed(2)}</td>
+                <td>{transaction.status}</td>
+                <td>
+                  {transaction.status === 'completed' && (
+                    <button 
+                      onClick={() => openRefundForm(transaction.id, transaction.amount)}
+                      className="refund-button"
+                    >
+                      Refund
+                    </button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Refund Form */}
+      {refundForm.paymentId && (
+        <div className="refund-form-overlay">
+          <div className="refund-form">
+            <h3>Process Refund</h3>
+            
+            <div className="form-group">
+              <label>Refund Amount ($)</label>
+              <input
+                type="number"
+                step="0.01"
+                value={refundForm.amount}
+                onChange={(e) => setRefundForm({...refundForm, amount: e.target.value})}
+              />
+              <small>Leave empty for full refund</small>
+            </div>
+
+            <div className="form-group">
+              <label>Reason</label>
+              <select
+                value={refundForm.reason}
+                onChange={(e) => setRefundForm({...refundForm, reason: e.target.value})}
+              >
+                <option value="requested_by_customer">Requested by customer</option>
+                <option value="duplicate">Duplicate</option>
+                <option value="fraudulent">Fraudulent</option>
+              </select>
+            </div>
+
+            <div className="form-actions">
+              <button onClick={handleRefund} className="process-refund-button">
+                Process Refund
+              </button>
+              <button 
+                onClick={() => setRefundForm({paymentId: null, amount: '', reason: 'requested_by_customer'})}
+                className="cancel-button"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default AdminDashboard;
+```
+
+### Main App Component
+
+```typescript
+// App.tsx
+import React from 'react';
+import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
+import { AuthProvider, useAuth } from './contexts/AuthContext';
+import Checkout from './components/Checkout';
+import SubscriptionManager from './components/SubscriptionManager';
+import PaymentHistory from './components/PaymentHistory';
+import AdminDashboard from './components/AdminDashboard';
+import './App.css';
+
+const Login: React.FC = () => {
+  const { login, register } = useAuth();
+  const [email, setEmail] = React.useState('');
+  const [isLogin, setIsLogin] = React.useState(true);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      if (isLogin) {
+        await login(email);
+      } else {
+        await register(email);
+      }
+    } catch (error) {
+      console.error('Auth error:', error);
+    }
+  };
+
+  return (
+    <div className="login-form">
+      <h2>{isLogin ? 'Login' : 'Register'}</h2>
+      <form onSubmit={handleSubmit}>
+        <input
+          type="email"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          placeholder="Email"
+          required
+        />
+        <button type="submit">{isLogin ? 'Login' : 'Register'}</button>
+      </form>
+      <p>
+        {isLogin ? "Don't have an account? " : "Already have an account? "}
+        <button onClick={() => setIsLogin(!isLogin)}>
+          {isLogin ? 'Register' : 'Login'}
+        </button>
+      </p>
+    </div>
+  );
+};
+
+const Dashboard: React.FC = () => {
+  const { user, logout } = useAuth();
+  const [currentView, setCurrentView] = React.useState<'checkout' | 'subscriptions' | 'history' | 'admin'>('checkout');
+
+  const handleCheckoutSuccess = () => {
+    alert('Payment successful!');
+    setCurrentView('history');
+  };
+
+  return (
+    <div className="dashboard">
+      <nav className="dashboard-nav">
+        <h1>Payment System</h1>
+        <div className="nav-links">
+          <button onClick={() => setCurrentView('checkout')}>One-time Payment</button>
+          <button onClick={() => setCurrentView('subscriptions')}>Subscriptions</button>
+          <button onClick={() => setCurrentView('history')}>Payment History</button>
+          <button onClick={() => setCurrentView('admin')}>Admin</button>
+        </div>
+        <div className="user-info">
+          <span>{user?.email}</span>
+          <button onClick={logout}>Logout</button>
+        </div>
+      </nav>
+
+      <main className="dashboard-content">
+        {currentView === 'checkout' && (
+          <div>
+            <h2>Make a Payment</h2>
+            <Checkout 
+              amount={2000} // $20.00
+              description="Test Payment"
+              onSuccess={handleCheckoutSuccess}
+            />
+          </div>
+        )}
+        
+        {currentView === 'subscriptions' && <SubscriptionManager />}
+        {currentView === 'history' && <PaymentHistory />}
+        {currentView === 'admin' && <AdminDashboard />}
+      </main>
+    </div>
+  );
+};
+
+const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const { user, isLoading } = useAuth();
+
+  if (isLoading) {
+    return <div>Loading...</div>;
+  }
+
+  return user ? <>{children}</> : <Navigate to="/login" />;
+};
+
+const App: React.FC = () => {
+  return (
+    <AuthProvider>
+      <Router>
+        <div className="App">
+          <Routes>
+            <Route path="/login" element={<Login />} />
+            <Route path="/" element={
+              <ProtectedRoute>
+                <Dashboard />
+              </ProtectedRoute>
+            } />
+          </Routes>
+        </div>
+      </Router>
+    </AuthProvider>
+  );
+};
+
+export default App;
+```
+
+### Basic Styling
+
+```css
+/* App.css */
+.App {
+  text-align: center;
+}
+
+.login-form {
+  max-width: 400px;
+  margin: 2rem auto;
+  padding: 2rem;
+  border: 1px solid #ddd;
+  border-radius: 8px;
+}
+
+.login-form input {
+  width: 100%;
+  padding: 0.5rem;
+  margin: 0.5rem 0;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+}
+
+.login-form button {
+  padding: 0.5rem 1rem;
+  margin: 0.5rem;
+  background: #007cba;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.dashboard {
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.dashboard-nav {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 1rem;
+  background: #f5f5f5;
+  margin-bottom: 2rem;
+}
+
+.nav-links button {
+  margin: 0 0.5rem;
+  padding: 0.5rem 1rem;
+  background: #007cba;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.checkout-form, .subscription-form {
+  max-width: 500px;
+  margin: 2rem auto;
+  padding: 2rem;
+  border: 1px solid #ddd;
+  border-radius: 8px;
+}
+
+.form-group {
+  margin: 1rem 0;
+}
+
+.form-group label {
+  display: block;
+  margin-bottom: 0.5rem;
+  font-weight: bold;
+}
+
+.pay-button, .subscribe-button {
+  width: 100%;
+  padding: 1rem;
+  background: #007cba;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 1rem;
+}
+
+.pay-button:disabled, .subscribe-button:disabled {
+  background: #ccc;
+  cursor: not-allowed;
+}
+
+.error-message {
+  color: red;
+  margin: 1rem 0;
+}
+
+.payments-table table, .transactions-table table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 2rem 0;
+}
+
+.payments-table th, .payments-table td,
+.transactions-table th, .transactions-table td {
+  border: 1px solid #ddd;
+  padding: 0.5rem;
+  text-align: left;
+}
+
+.payments-table th, .transactions-table th {
+  background: #f5f5f5;
+}
+
+.status-badge {
+  font-weight: bold;
+}
+
+.subscription-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 1rem;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  margin: 1rem 0;
+}
+
+.plan-card {
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  padding: 1rem;
+  margin: 1rem;
+  display: inline-block;
+  min-width: 200px;
+}
+
+.refund-form-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+.refund-form {
+  background: white;
+  padding: 2rem;
+  border-radius: 8px;
+  max-width: 400px;
+  width: 90%;
+}
+
+.refund-form input, .refund-form select {
+  width: 100%;
+  padding: 0.5rem;
+  margin: 0.5rem 0;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+}
+
+.form-actions {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 1rem;
+}
+
+.form-actions button {
+  padding: 0.5rem 1rem;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.process-refund-button {
+  background: #dc3545;
+  color: white;
+}
+
+.cancel-button {
+  background: #6c757d;
+  color: white;
+}
+```
+
+### Environment Variables
+
+Create a `.env` file in your Flask backend directory:
+
+```bash
+SECRET_KEY=your-secret-key-here
+STRIPE_SECRET_KEY=sk_test_your_stripe_secret_key
+STRIPE_PUBLISHABLE_KEY=pk_test_your_stripe_publishable_key
+STRIPE_WEBHOOK_SECRET=whsec_your_webhook_secret
+JWT_SECRET_KEY=your-jwt-secret-key
+DATABASE_URL=sqlite:///payments.db
+```
+
+## Setup Instructions
+
+1. **Backend Setup**:
+   ```bash
+   pip install -r requirements.txt
+   python app.py
+   ```
+
+2. **Frontend Setup**:
+   ```bash
+   npm install
+   npm start
+   ```
+
+3. **Stripe Configuration**:
+   - Create a Stripe account
+   - Get your API keys from the Stripe dashboard
+   - Set up webhook endpoints in Stripe dashboard pointing to `/webhook`
+   - Create product and price objects for subscriptions
+
+This implementation provides a complete payment processing system with Stripe integration, subscription management, payment history, webhook handling, admin dashboard, and refund processing capabilities.

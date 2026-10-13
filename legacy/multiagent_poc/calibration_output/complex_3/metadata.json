@@ -1,0 +1,17 @@
+{
+  "task_id": "complex_3",
+  "task_name": "Analytics Dashboard",
+  "ground_truth": "DECOMPOSE",
+  "actual_input_tokens": 161,
+  "actual_output_tokens": 16000,
+  "truncated": true,
+  "stop_reason": "max_tokens",
+  "execution_time_seconds": 155.28,
+  "response_length_chars": 50863,
+  "thinking_length_chars": 1328,
+  "cost_usd": 0.240483,
+  "success": false,
+  "model": "claude-sonnet-4-20250514",
+  "extended_thinking_enabled": true,
+  "ground_truth_validation": "EXPECTED - Task marked for DECOMPOSE"
+}

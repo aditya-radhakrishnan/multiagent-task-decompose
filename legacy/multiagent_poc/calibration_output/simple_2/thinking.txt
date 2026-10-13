@@ -1,0 +1,30 @@
+I need to build a weather dashboard application with the following requirements:
+1. Backend: Python/Flask
+2. Frontend: React/TypeScript
+3. Fetch weather data from external API
+4. Display current weather for searched city
+5. Show 5-day forecast
+6. Save favorite cities
+
+For this implementation, I'll need:
+
+Backend (Flask):
+- Flask app with routes for weather data
+- Integration with OpenWeatherMap API (free tier)
+- SQLite database to store favorite cities
+- CORS handling for React frontend
+- Routes: 
+  - GET /api/weather/<city> - get current weather
+  - GET /api/forecast/<city> - get 5-day forecast  
+  - GET /api/favorites - get favorite cities
+  - POST /api/favorites - add favorite city
+  - DELETE /api/favorites/<city> - remove favorite city
+
+Frontend (React/TypeScript):
+- Search component
+- Current weather display
+- 5-day forecast display
+- Favorites management
+- Basic styling
+
+I'll use OpenWeatherMap API since it's popular and has a free tier. I'll structure this as a complete working application.

@@ -1,0 +1,17 @@
+{
+  "task_id": "complex_1",
+  "task_name": "E-commerce Catalog",
+  "ground_truth": "SINGLE_AGENT",
+  "actual_input_tokens": 171,
+  "actual_output_tokens": 12000,
+  "truncated": true,
+  "stop_reason": "max_tokens",
+  "execution_time_seconds": 116.35,
+  "response_length_chars": 38681,
+  "thinking_length_chars": 1022,
+  "cost_usd": 0.180513,
+  "success": false,
+  "model": "claude-sonnet-4-5-20250929",
+  "extended_thinking_enabled": true,
+  "ground_truth_validation": "FAILED - Expected SINGLE_AGENT to work, but truncated"
+}
