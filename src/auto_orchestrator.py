@@ -28,6 +28,7 @@ class AutoDecomposingOrchestrator:
         
         self.completed_subtasks = set()
         self.execution_log = []
+        self.last_stop_reason = None
         
         # Cost tracking
         self.total_input_tokens = 0
@@ -139,7 +140,6 @@ Provide only the JSON, no additional commentary.
                 dep_str = f" (depends on: {', '.join(deps)})" if deps else " (no dependencies)"
                 print(f"  [{subtask['id']}] {subtask['name']}{dep_str}")
             
-            # ===== FIX #2: Add decomposition analysis =====
             print(f"\n{'='*60}")
             print(f"DECOMPOSITION ANALYSIS")
             print(f"{'='*60}")
@@ -174,7 +174,6 @@ Provide only the JSON, no additional commentary.
                 print(f"      Risk: {risk}")
             
             print(f"{'='*60}\n")
-            # ===== END FIX #2 =====
             
             # Save decomposition
             decomp_path = os.path.join(self.debug_dir, "task_decomposition.json")
@@ -293,20 +292,20 @@ The status line must be the LAST line of your response.
         """Call Claude to work on a subtask"""
         prompt = self.build_prompt(subtask, context, iteration, max_iterations)
         
-        # ===== FIX #1: Increase token limit from 8000 to 16000 =====
         message = client.messages.create(
             model="claude-sonnet-4-5-20250929",
-            max_tokens=16000,  # INCREASED from 8000 to allow larger subtasks
+            max_tokens=16000,
             messages=[{"role": "user", "content": prompt}]
         )
-        # ===== END FIX #1 =====
-        
+
         self.total_input_tokens += message.usage.input_tokens
         self.total_output_tokens += message.usage.output_tokens
-        
+        # "max_tokens" here means the subtask's output was cut off
+        self.last_stop_reason = message.stop_reason
+
         response = message.content[0].text
-        
-        print(f"Tokens: {message.usage.input_tokens} in, {message.usage.output_tokens} out")
+
+        print(f"Tokens: {message.usage.input_tokens} in, {message.usage.output_tokens} out (stop: {message.stop_reason})")
         
         return response
     
@@ -409,13 +408,13 @@ The status line must be the LAST line of your response.
                 if self.is_complete(response):
                     self.completed_subtasks.add(subtask_id)
                     print(f"✓ Subtask {subtask_id} marked COMPLETE")
-                    self.log_execution_event(iteration, subtask_id, "COMPLETE")
+                    self.log_execution_event(iteration, subtask_id, "COMPLETE", f"stop_reason={self.last_stop_reason}")
                 elif self.is_blocked(response):
                     print(f"⧗ Subtask {subtask_id} is BLOCKED")
-                    self.log_execution_event(iteration, subtask_id, "BLOCKED")
+                    self.log_execution_event(iteration, subtask_id, "BLOCKED", f"stop_reason={self.last_stop_reason}")
                 else:
                     print(f"→ Subtask {subtask_id} in progress")
-                    self.log_execution_event(iteration, subtask_id, "IN_PROGRESS")
+                    self.log_execution_event(iteration, subtask_id, "IN_PROGRESS", f"stop_reason={self.last_stop_reason}")
             
             if all_complete:
                 print(f"\n{'='*60}")

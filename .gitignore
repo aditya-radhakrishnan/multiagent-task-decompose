@@ -3,4 +3,4 @@ __pycache__/
 .venv/
 .env
 .DS_Store
-experiments/outputs/*/parallel_temp/
+experiments/outputs/**/parallel_temp/

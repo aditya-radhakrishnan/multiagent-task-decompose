@@ -1,0 +1,30 @@
+  api_endpoint run_1 single_first #0: single 26/40, multi 27/40  ($0.15)
+  api_endpoint run_1 single_first #1: single 30/40, multi 28/40  ($0.14)
+  api_endpoint run_1 multi_first #0: single 26/40, multi 31/40  ($0.14)
+  api_endpoint run_1 multi_first #1: single 25/40, multi 29/40  ($0.14)
+  api_endpoint run_2 single_first #0: single 26/40, multi 26/40  ($0.12)
+  api_endpoint run_2 single_first #1: single 27/40, multi 25/40  ($0.12)
+  api_endpoint run_2 multi_first #0: single 24/40, multi 30/40  ($0.12)
+  api_endpoint run_2 multi_first #1: single 25/40, multi 29/40  ($0.12)
+  api_endpoint run_3 single_first #0: single 23/40, multi 29/40  ($0.13)
+  api_endpoint run_3 single_first #1: single 25/40, multi 29/40  ($0.13)
+  api_endpoint run_3 multi_first #0: single 24/40, multi 29/40  ($0.14)
+  api_endpoint run_3 multi_first #1: single 25/40, multi 30/40  ($0.14)
+  ecommerce run_1 single_first #0: single 27/40, multi 21/40  ($0.41)
+  ecommerce run_1 single_first #1: single 26/40, multi 22/40  ($0.42)
+  ecommerce run_1 multi_first #0: single 20/40, multi 25/40  ($0.41)
+  ecommerce run_1 multi_first #1: single 19/40, multi 25/40  ($0.42)
+  ecommerce run_2 single_first #0: single 28/40, multi 19/40  ($0.35)
+  ecommerce run_2 single_first #1: single 30/40, multi 20/40  ($0.35)
+  ecommerce run_2 multi_first #0: single 25/40, multi 22/40  ($0.37)
+  ecommerce run_2 multi_first #1: single 26/40, multi 23/40  ($0.36)
+  ecommerce run_3 single_first #0: single 30/40, multi 19/40  ($0.31)
+  ecommerce run_3 single_first #1: single 29/40, multi 18/40  ($0.31)
+  ecommerce run_3 multi_first #0: single 28/40, multi 22/40  ($0.32)
+  ecommerce run_3 multi_first #1: single 29/40, multi 22/40  ($0.32)
+
+Spent $5.91
+
+task           runs gradings  single mean  multi mean
+api_endpoint      3       12         25.5        28.5
+ecommerce         3       12         26.4        21.5

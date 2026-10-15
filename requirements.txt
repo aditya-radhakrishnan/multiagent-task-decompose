@@ -1,1 +1,2 @@
-anthropic
+anthropic==0.125.0
+matplotlib==3.9.4
